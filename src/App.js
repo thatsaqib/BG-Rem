@@ -86,7 +86,7 @@ function App() {
     formData.append('file', selectedFile);
 
     try {
-      const response = await axios.post(process.env.BACKEND_URI, formData, {
+      const response = await axios.post(process.env.BACKEND_URI + '/process', formData, {
         responseType: 'blob',
         timeout: 120000 // 2 minutes for HD
       });
