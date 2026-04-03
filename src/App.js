@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import './index.css';
-import 'dotenv/config';
 
 // --- INDEXED DB HELPER FUNCTIONS ---
 const openDB = () => {
