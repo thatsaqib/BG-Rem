@@ -1,14 +1,83 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import './index.css';
+import 'dotenv/config';
+
+// --- INDEXED DB HELPER FUNCTIONS ---
+const openDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("BlackmoonDB", 1);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains("sessions")) {
+        db.createObjectStore("sessions", { keyPath: "id" });
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject("DB Open Error");
+  });
+};
+
+const saveToDB = async (base64Data) => {
+  const db = await openDB();
+  const tx = db.transaction("sessions", "readwrite");
+  const store = tx.objectStore("sessions");
+  // Sirf 5 latest images rakhne ke liye logic yahan handle ho sakta hai
+  await store.put({ id: Date.now().toString(), data: base64Data });
+  return tx.complete;
+};
+
+const getHistoryFromDB = async () => {
+  const db = await openDB();
+  const tx = db.transaction("sessions", "readonly");
+  const store = tx.objectStore("sessions");
+  const request = store.getAll();
+  return new Promise((resolve) => {
+    request.onsuccess = () => {
+      // Reverse taake naya session top par aaye aur limit 6 images
+      const results = request.result.reverse().slice(0, 6);
+      resolve(results.map(item => item.data));
+    };
+  });
+};
+
+const blobToBase64 = (blob) => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
+  });
+};
 
 function App() {
-  const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [history, setHistory] = useState([]);
   const [dragging, setDragging] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  const handleProcess = async (selectedFile) => {
+  // Load History on Start
+  useEffect(() => {
+    getHistoryFromDB().then(saved => setHistory(saved));
+  }, []);
+
+  // Fake Progress Logic
+  useEffect(() => {
+    let interval;
+    if (loading) {
+      setProgress(0);
+      interval = setInterval(() => {
+        setProgress((prev) => (prev < 98 ? prev + 1 : prev));
+      }, 150);
+    } else {
+      clearInterval(interval);
+    }
+    return () => clearInterval(interval);
+  }, [loading]);
+
+  const handleProcess = useCallback(async (selectedFile) => {
     if (!selectedFile) return;
     setPreview(URL.createObjectURL(selectedFile));
     setLoading(true);
@@ -18,123 +87,189 @@ function App() {
     formData.append('file', selectedFile);
 
     try {
-      // Connecting to your Ubuntu Backend
-      const response = await axios.post('http://localhost:8000/process', formData, {
+      const response = await axios.post(process.env.BACKEND_URI, formData, {
         responseType: 'blob',
+        timeout: 120000 // 2 minutes for HD
       });
-      setResult(URL.createObjectURL(response.data));
+
+      const resUrl = URL.createObjectURL(response.data);
+      setResult(resUrl);
+
+      const base64 = await blobToBase64(response.data);
+      await saveToDB(base64);
+
+      // Update sidebar history
+      const updatedHistory = await getHistoryFromDB();
+      setHistory(updatedHistory);
+
     } catch (err) {
-      console.error(err);
-      alert("AI Engine offline. Please check if backend is running!");
+      alert("Please Try Again!");
     } finally {
       setLoading(false);
+      setProgress(0);
       setDragging(false);
     }
-  };
+  }, []);
 
   return (
-    <div className="min-h-screen bg-[#020202] text-white font-sans selection:bg-purple-500/30 overflow-x-hidden">
-      {/* Dynamic Background Glows */}
-      <div className="fixed top-[-10%] left-[-10%] w-[40%] h-[40%] bg-purple-900/20 blur-[120px] rounded-full pointer-events-none" />
-      <div className="fixed bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-900/10 blur-[120px] rounded-full pointer-events-none" />
-
-      {/* Navigation */}
-      <nav className="flex justify-between items-center px-8 py-6 relative z-10 border-b border-white/5 backdrop-blur-md bg-black/20">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center font-black text-xs shadow-lg shadow-purple-500/20">B</div>
-          <span className="text-xl font-black tracking-tighter uppercase italic">Blackmoon<span className="text-purple-500 text-sm ml-1">AI</span></span>
+    <div className="app-layout">
+      {/* SIDEBAR */}
+      <aside className={`sidebar ${isSidebarOpen ? 'mobile-open' : ''}`}>
+        <button className="close-sidebar" onClick={() => setIsSidebarOpen(false)}>×</button>
+        <h3 style={{ fontSize: '10px', letterSpacing: '2px', color: '#444', marginBottom: '20px', fontWeight: '900' }}>SESSIONS</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+          {history.map((img, i) => (
+            <div key={i} className="sidebar-session-item" onClick={() => { setPreview(img); setResult(img); }}>
+              <img src={img} alt="past" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            </div>
+          ))}
+          {history.length === 0 && <p style={{ fontSize: '11px', color: '#333' }}>No activity.</p>}
         </div>
-        <div className="hidden md:flex gap-8 text-xs font-bold tracking-widest text-gray-400 uppercase">
-          <a href="#" className="hover:text-purple-400 transition">Models</a>
-          <a href="#" className="hover:text-purple-400 transition">API</a>
-          <a href="#" className="hover:text-purple-400 transition">Pricing</a>
-        </div>
-      </nav>
+      </aside>
 
-      {/* Hero Section */}
-      <main className="max-w-6xl mx-auto pt-20 pb-32 px-6 relative z-10">
-        <div className="text-center mb-16">
-          <div className="inline-block px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold tracking-[0.2em] uppercase text-purple-400 mb-6">
-            Industrial Grade AI Tools
+      <div className="main-viewport">
+        <nav className="nav-glass">
+          <div className="nav-logo" onClick={() => window.location.href = "/"} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+            <img
+              src="/image.png"
+              alt="Logo"
+              className="nav-custom-logo" // Nayi class add ki hai
+              style={{
+                width: '35px',
+                height: '35px',
+                objectFit: 'contain'
+              }}
+            />
+            <span style={{ fontWeight: '900', fontSize: '18px' }}>BLACKMOON AI</span>
           </div>
-          <h1 className="text-5xl md:text-7xl font-black mb-6 tracking-tight leading-[1.1]">
-            Remove <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-blue-400 to-cyan-400">Backgrounds</span> <br/>
-            with Neural Precision.
-          </h1>
-          <p className="text-gray-400 text-lg md:text-xl max-w-2xl mx-auto leading-relaxed">
-            Experience ultra-high definition background removal powered by Blackmoon's custom 2048px upscaling engine.
-          </p>
-        </div>
+          {/* HAMBURGER MENU (Mobile Only) */}
+          <div className="hamburger" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
+            <div className={`bar ${isSidebarOpen ? 'active' : ''}`}></div>
+            <div className={`bar ${isSidebarOpen ? 'active' : ''}`}></div>
+            <div className={`bar ${isSidebarOpen ? 'active' : ''}`}></div>
+          </div>
+          <div className="nav-links">
+            <a href="#tool">PROCESSOR</a>
+            <a href="#about">ABOUT US</a>
+          </div>
+        </nav>
 
-        {/* The Tool Card */}
-        <div className="max-w-4xl mx-auto">
-          <div className={`relative p-1 rounded-[40px] transition-all duration-700 ${loading ? 'bg-gradient-to-r from-purple-600 to-blue-600 animate-pulse' : 'bg-white/5'}`}>
-            <div className="bg-[#0a0a0a] rounded-[38px] p-8 md:p-12 border border-white/5 shadow-2xl">
-              
-              {!preview && !loading && (
-                <div 
-                  className={`group relative aspect-video rounded-[30px] border-2 border-dashed flex flex-col items-center justify-center transition-all duration-500 cursor-pointer
-                    ${dragging ? 'border-purple-500 bg-purple-500/5 scale-[1.02]' : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]'}`}
+        <main className="content-container" style={{ padding: '40px' }}>
+          <header style={{ textAlign: 'center', marginBottom: '80px' }}>
+            <h1 className="premium-heading">Neural <span className="text-gradient">Background</span> Extraction</h1>
+            <p style={{ color: '#444', fontSize: '18px' }}>Powered by Restful Studios.</p>
+          </header>
+
+          <section id="tool" style={{ display: 'flex', justifyContent: 'center' }}>
+            <div className="tool-card-inner" style={{
+              width: '100%', maxWidth: '900px', height: '500px', background: '#0a0a0a',
+              borderRadius: '40px', border: '1px solid #111', position: 'relative',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden'
+            }}>
+              {!preview && !loading ? (
+                <div
+                  className={`upload-zone ${dragging ? 'dragging' : ''}`}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    border: '2px dashed #222', // Dotted border yahan lagayein
+                    borderRadius: '40px',      // Box ke corners se match karein
+                    boxSizing: 'border-box',
+                    margin: '0',               // Kisi bhi kism ka margin khatam
+                    padding: '0'
+                  }}
                   onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
                   onDragLeave={() => setDragging(false)}
                   onDrop={(e) => { e.preventDefault(); handleProcess(e.dataTransfer.files[0]); }}
                   onClick={() => document.getElementById('file-upload').click()}
                 >
-                  <div className="w-20 h-20 bg-gradient-to-br from-purple-500/20 to-blue-600/20 rounded-3xl flex items-center justify-center mb-6 group-hover:rotate-12 transition-transform duration-500">
-                    <svg className="w-10 h-10 text-purple-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 002 2z" />
-                    </svg>
-                  </div>
-                  <h4 className="text-2xl font-bold mb-2">Drop your masterpiece</h4>
-                  <p className="text-gray-500 text-sm uppercase tracking-widest font-medium">Supports PNG, JPG & WebP</p>
-                  <input id="file-upload" type="file" className="hidden" onChange={(e) => handleProcess(e.target.files[0])} />
+                  <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="1">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                  <h2 style={{ fontSize: '24px', fontWeight: '900', marginTop: '20px' }}>Drop High-Res Image</h2>
+                  <input id="file-upload" type="file" hidden onChange={(e) => handleProcess(e.target.files[0])} />
                 </div>
-              )}
-
-              {loading && (
-                <div className="aspect-video flex flex-col items-center justify-center space-y-8">
-                  <div className="relative w-24 h-24">
-                    <div className="absolute inset-0 border-[3px] border-purple-500/20 rounded-full" />
-                    <div className="absolute inset-0 border-[3px] border-purple-500 rounded-full border-t-transparent animate-spin" />
-                  </div>
-                  <div className="text-center">
-                    <p className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-blue-400 animate-pulse">Neural Engine Processing...</p>
-                    <p className="text-gray-600 text-sm mt-2 uppercase tracking-widest">Applying 2048px Lanczos Upscaling</p>
-                  </div>
+              ) : loading ? (
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '84px', fontWeight: '900', color: '#fff', letterSpacing: '-5px' }}>{progress}%</div>
+                  <p style={{ fontWeight: '900', letterSpacing: '4px', color: '#a855f7', fontSize: '11px' }}>EXTRACTING SUBJECT...</p>
                 </div>
-              )}
-
-              {preview && !loading && (
-                <div className="flex flex-col space-y-8">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="space-y-3">
-                      <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-bold ml-2">Source Image</p>
-                      <div className="rounded-2xl overflow-hidden border border-white/5 bg-white/5 p-2">
-                        <img src={preview} alt="Input" className="w-full h-auto rounded-xl grayscale opacity-50" />
-                      </div>
-                    </div>
-                    <div className="space-y-3">
-                      <p className="text-[10px] uppercase tracking-[0.2em] text-purple-400 font-bold ml-2 text-right">Processed Result</p>
-                      <div className="rounded-2xl overflow-hidden border border-purple-500/20 bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')] p-2 shadow-[0_0_50px_rgba(168,85,247,0.1)]">
-                        <img src={result || preview} alt="Output" className={`w-full h-auto rounded-xl transition-all duration-1000 ${!result ? 'blur-xl' : 'blur-0'}`} />
-                      </div>
-                    </div>
+              ) : (
+                <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', padding: '25px' }}>
+                  <div className="checkerboard-bg" style={{ flex: 1, borderRadius: '20px', display: 'flex', justifyContent: 'center', overflow: 'hidden' }}>
+                    <img
+                      src={result || preview}
+                      alt="result"
+                      className="result-zoom-image"
+                      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                    />
                   </div>
-                  
-                  <div className="flex flex-col md:flex-row gap-4 pt-4">
-                    <button onClick={() => {setPreview(null); setResult(null);}} className="flex-1 py-5 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 font-bold transition-all uppercase tracking-widest text-xs">New Project</button>
-                    <a href={result} download="blackmoon_ai_master.png" className={`flex-1 py-5 rounded-2xl bg-gradient-to-r from-purple-600 to-blue-700 text-center font-black text-xs uppercase tracking-[0.2em] shadow-xl hover:shadow-purple-500/20 hover:scale-[1.02] transition-all ${!result ? 'opacity-50 pointer-events-none' : ''}`}>Download HD Copy</a>
+                  <div style={{ display: 'flex', gap: '12px', marginTop: '20px' }} className='btns'>
+                    <button onClick={() => { setPreview(null); setResult(null); }} className="btn-secondary" style={{ flex: 1 }}>NEW PROJECT</button>
+                    <a href={result} download="blackmoon_ai.png" className="btn-primary" style={{ flex: 2, textAlign: 'center', textDecoration: 'none' }}>DOWNLOAD HD PNG</a>
                   </div>
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      </main>
+          </section>
 
-      <footer className="text-center py-20 border-t border-white/5">
-        <p className="text-[10px] tracking-[0.5em] text-gray-600 font-bold uppercase">Restful Studios &copy; 2026 &bull; Blackmoon AI Systems</p>
-      </footer>
+          {/* ABOUT US */}
+          <section id="about" className="about-section">
+            <h2 className="premium-heading">About <span className="text-gradient">Restful Studios</span></h2>
+            <div className="grid-2" style={{ alignItems: 'center' }}>
+              <div>
+                <p style={{ color: '#888', lineHeight: '1.8', fontSize: '16px' }}>
+                  Blackmoon AI is a specialized neural engine developed by **Restful Studios** in Lahore, Pakistan.
+                </p>
+                <p style={{ color: '#888', lineHeight: '1.8', fontSize: '16px', marginTop: '20px' }}>
+                  By combining the power of AI models, we ensure every pixel is preserved while background extraction remains lightning-fast.
+                </p>
+              </div>
+              <div style={{ background: 'linear-gradient(45deg, #111, #000)', padding: '40px', borderRadius: '30px', textAlign: 'center', border: '1px solid #1a1a1a' }}>
+                <h3 style={{ color: '#fff', fontSize: '32px', fontWeight: '900' }}>2026</h3>
+                <p style={{ color: '#a855f7', fontWeight: 'bold' }}>Year of Innovation</p>
+              </div>
+            </div>
+          </section>
+
+          {/* FEEDBACK */}
+          <section style={{ marginTop: '140px', marginBottom: '100px' }}>
+            <h2 className="premium-heading">User <span className="text-gradient">Pulse</span></h2>
+            <div className="reviews-wrapper">
+              <div className="reviews-track">
+                {[1, 2, 3, 4, 1, 2, 3, 4].map((u, i) => (
+                  <div key={i} className="review-card">
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '10px' }}>
+                      <img src={`https://i.pravatar.cc/150?u=${i}`} width="30" height="30" style={{ borderRadius: '50%' }} />
+                      <div style={{ fontWeight: '900', fontSize: '12px' }}>Satisfied User</div>
+                    </div>
+                    <p style={{ fontSize: '12px', color: '#666' }}>Perfect transparency every time. Blackmoon AI is now part of my daily workflow.</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* COFFEE */}
+          <section style={{ textAlign: 'center', padding: '80px 20px', background: '#050505', borderRadius: '40px' }}>
+            <h2 className="premium-heading">Support Saqib</h2>
+            <a href="https://buymeacoffee.com/saqib" className="coffee-btn" target="_blank" rel="noreferrer">
+              <img src="https://cdn.buymeacoffee.com/buttons/bmc-new-btn-logo.svg" alt="bmc" width="20" />
+              BUY ME A COFFEE
+            </a>
+          </section>
+        </main>
+
+        <footer style={{ textAlign: 'center', padding: '60px', color: '#222', letterSpacing: '2px', fontSize: '10px', fontWeight: '900' }}>
+          RESTFUL STUDIOS &bull; LAHORE &bull; PAKISTAN
+        </footer>
+      </div>
     </div>
   );
 }
